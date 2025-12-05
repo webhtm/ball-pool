@@ -1,0 +1,591 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Ball Pool</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #333; /* Dark background */
+            touch-action: none;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+        #game-container {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            background: radial-gradient(circle at center, #444 0%, #222 100%); /* subtle vignette */
+        }
+        canvas {
+            box-shadow: 0 20px 50px rgba(0,0,0,0.8);
+            border-radius: 16px;
+            /* Richer green felt */
+            background: radial-gradient(circle at 50% 30%, #1a4731 0%, #0f2e1f 100%); 
+            /* Dark Oak Wood border */
+            border: 16px solid #3e2723; 
+            border-image: linear-gradient(to bottom right, #5d4037, #3e2723, #2a1b15) 1;
+            box-sizing: border-box; /* Important for border to be outside canvas dims */
+        }
+        .ui-layer {
+            position: absolute;
+            top: 24px;
+            left: 0;
+            width: 100%;
+            pointer-events: none;
+            display: flex;
+            justify-content: space-between;
+            padding: 0 24px;
+            box-sizing: border-box;
+            z-index: 5;
+        }
+        .score-box {
+            background: rgba(0, 0, 0, 0.75);
+            color: #e2e8f0;
+            padding: 12px 24px;
+            border-radius: 12px;
+            font-size: 1.1rem;
+            font-weight: 600;
+            backdrop-filter: blur(8px);
+            border: 1px solid rgba(255,255,255,0.15);
+            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+        }
+        #message-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.85);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            z-index: 10;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.4s ease-in-out;
+            backdrop-filter: blur(5px);
+        }
+        #message-overlay.active {
+            opacity: 1;
+            pointer-events: all;
+        }
+        .btn {
+            background: linear-gradient(to bottom, #f6ad55, #ed8936); /* Orange gradient */
+            color: #fff;
+            padding: 14px 32px;
+            border-radius: 10px;
+            font-weight: 700;
+            cursor: pointer;
+            border: none;
+            margin-top: 20px;
+            font-size: 1.1rem;
+            transition: all 0.2s;
+            box-shadow: 0 4px 10px rgba(237, 137, 54, 0.5);
+            text-shadow: 0 1px 2px rgba(0,0,0,0.3);
+        }
+        .btn:hover { transform: translateY(-2px); box-shadow: 0 6px 15px rgba(237, 137, 54, 0.6); }
+        .btn:active { transform: translateY(1px); box-shadow: 0 2px 5px rgba(237, 137, 54, 0.4); }
+        h1 { color: white; margin-bottom: 12px; font-size: 2.5rem; text-shadow: 0 3px 6px rgba(0,0,0,0.6); }
+    </style>
+</head>
+<body>
+
+<div id="game-container">
+    <canvas id="gameCanvas"></canvas>
+    
+    <div class="ui-layer">
+        <div class="score-box">Score: <span id="scoreVal">0</span></div>
+        <div class="score-box">Balls: <span id="ballsVal">0</span></div>
+    </div>
+
+    <div id="message-overlay">
+        <h1 id="msg-title">Ball Pool</h1>
+        <p style="color: #cbd5e0; margin-bottom: 25px; font-size: 1.1rem;" id="msg-desc">Drag to sling the coin ball. Sink all the others!</p>
+        <button class="btn" onclick="startGame()">Start Game</button>
+    </div>
+</div>
+
+<script>
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    const scoreEl = document.getElementById('scoreVal');
+    const ballsEl = document.getElementById('ballsVal');
+    const overlay = document.getElementById('message-overlay');
+    const msgTitle = document.getElementById('msg-title');
+    const msgDesc = document.getElementById('msg-desc');
+
+    // Game Constants
+    const FRICTION = 0.982; // Slightly more friction for better control
+    const ELASTICITY = 0.8;
+    const BALL_ELASTICITY = 0.92; // Slightly bouncier balls
+    const MAX_DRAG_DIST = 160;
+    const POWER_MULTIPLIER = 0.14;
+    const STOP_THRESHOLD = 0.12;
+    const BALL_RADIUS = 13;
+    const COIN_RADIUS = 15;
+    const HOLE_RADIUS = 22;
+    const SPIN_FRICTION = 0.96; // Friction for ball rotation
+
+    // State
+    let width, height;
+    let balls = [];
+    let player;
+    let holes = [];
+    let score = 0;
+    let isDragging = false;
+    let dragStart = { x: 0, y: 0 };
+    let dragCurrent = { x: 0, y: 0 };
+    let isGameActive = false;
+    let waitingForStop = false;
+
+    // Resize handling
+    function resize() {
+        // More vertical space for mobile
+        const maxWidth = Math.min(window.innerWidth - 24, 500);
+        const maxHeight = Math.min(window.innerHeight - 24, 900);
+        
+        canvas.width = maxWidth;
+        canvas.height = maxHeight;
+        width = canvas.width;
+        height = canvas.height;
+        
+        setupHoles();
+        if (player) resetPlayerPosition();
+    }
+
+    class Vector {
+        constructor(x, y) { this.x = x; this.y = y; }
+        add(v) { return new Vector(this.x + v.x, this.y + v.y); }
+        sub(v) { return new Vector(this.x - v.x, this.y - v.y); }
+        mult(s) { return new Vector(this.x * s, this.y * s); }
+        mag() { return Math.sqrt(this.x * this.x + this.y * this.y); }
+        normalize() {
+            const m = this.mag();
+            return m === 0 ? new Vector(0, 0) : new Vector(this.x / m, this.y / m);
+        }
+        dist(v) { return Math.sqrt(Math.pow(this.x - v.x, 2) + Math.pow(this.y - v.y, 2)); }
+    }
+
+    function createRandomGradientColors() {
+        const hue = Math.floor(Math.random() * 360);
+        const saturation = 70 + Math.floor(Math.random() * 30); // 70-100%
+        const lightness1 = 40 + Math.floor(Math.random() * 20); // 40-60%
+        const lightness2 = lightness1 + 15 + Math.floor(Math.random() * 15); // +15-30% brighter
+
+        const color1 = `hsl(${hue}, ${saturation}%, ${lightness1}%)`;
+        const color2 = `hsl(${hue}, ${saturation}%, ${lightness2}%)`;
+        return { c1: color1, c2: color2 };
+    }
+
+    class Ball {
+        constructor(x, y, r, isPlayer = false) {
+            this.pos = new Vector(x, y);
+            this.vel = new Vector(0, 0);
+            this.r = r;
+            // Player gets a distinct gold gradient
+            this.colors = isPlayer ? { c1: '#d97706', c2: '#fbbf24' } : createRandomGradientColors();
+            this.isPlayer = isPlayer;
+            this.mass = r;
+            this.inHole = false;
+            // Animation properties
+            this.rotation = Math.random() * Math.PI * 2;
+            this.spin = 0; // angular velocity
+            this.isFalling = false;
+            this.fallScale = 1;
+            this.fallOpacity = 1;
+        }
+
+        update() {
+            if (this.inHole) return;
+
+            if (this.isFalling) {
+                this.fallScale *= 0.9;
+                this.fallOpacity *= 0.8;
+                this.pos = this.pos.add(this.vel.mult(0.5)); // Move slower while falling
+                if (this.fallScale < 0.1) {
+                    this.inHole = true;
+                    this.isFalling = false;
+                }
+                return;
+            }
+
+            // Apply velocity & friction
+            this.pos = this.pos.add(this.vel);
+            this.vel = this.vel.mult(FRICTION);
+
+            // Update rotation based on velocity
+            this.spin = this.vel.mag() * 0.05 * (this.vel.x > 0 ? 1 : -1);
+            this.rotation += this.spin;
+            this.spin *= SPIN_FRICTION;
+
+            if (this.vel.mag() < STOP_THRESHOLD) this.vel = new Vector(0, 0);
+
+            // Wall Collisions
+            if (this.pos.x - this.r < 0) {
+                this.pos.x = this.r; this.vel.x *= -ELASTICITY; this.spin *= -0.5;
+            }
+            if (this.pos.x + this.r > width) {
+                this.pos.x = width - this.r; this.vel.x *= -ELASTICITY; this.spin *= -0.5;
+            }
+            if (this.pos.y - this.r < 0) {
+                this.pos.y = this.r; this.vel.y *= -ELASTICITY; this.spin *= -0.5;
+            }
+            if (this.pos.y + this.r > height) {
+                this.pos.y = height - this.r; this.vel.y *= -ELASTICITY; this.spin *= -0.5;
+            }
+        }
+
+        draw() {
+            if (this.inHole) return;
+
+            ctx.save();
+            ctx.translate(this.pos.x, this.pos.y);
+
+            // Special shadow for player to identify it easily
+            if (this.isPlayer && !this.isFalling) {
+                ctx.shadowColor = 'rgba(0, 0, 0, 0.9)';
+                ctx.shadowBlur = 25;
+            }
+
+            if (this.isFalling) {
+                ctx.scale(this.fallScale, this.fallScale);
+                ctx.globalAlpha = this.fallOpacity;
+            } else {
+                ctx.rotate(this.rotation);
+            }
+
+            ctx.beginPath();
+            ctx.arc(0, 0, this.r, 0, Math.PI * 2);
+
+            // Create gradient
+            const grad = ctx.createLinearGradient(-this.r, -this.r, this.r, this.r);
+            grad.addColorStop(0, this.colors.c1);
+            grad.addColorStop(1, this.colors.c2);
+            ctx.fillStyle = grad;
+            ctx.fill();
+
+            // Inner detail to show rotation better
+            ctx.beginPath();
+            ctx.arc(0, 0, this.r * 0.7, 0, Math.PI * 2);
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+            
+            // Specular highlight
+            ctx.beginPath();
+            ctx.arc(-this.r*0.3, -this.r*0.3, this.r*0.25, 0, Math.PI * 2);
+            ctx.fillStyle = "rgba(255, 255, 255, 0.5)";
+            ctx.fill();
+            
+            ctx.restore();
+        }
+    }
+
+    function setupHoles() {
+        // 3 Holes spaced along the top, avoiding corners
+        const topMargin = HOLE_RADIUS + 15;
+        const spacing = width / 4;
+        holes = [
+            { x: spacing, y: topMargin, r: HOLE_RADIUS },
+            { x: width / 2, y: topMargin, r: HOLE_RADIUS },
+            { x: width - spacing, y: topMargin, r: HOLE_RADIUS }
+        ];
+    }
+
+    function resetPlayerPosition() {
+        if (!player) return;
+        player.pos = new Vector(width / 2, height * 0.6); // Start slightly lower
+        player.vel = new Vector(0, 0);
+        player.inHole = false;
+        player.isFalling = false;
+        player.fallScale = 1;
+        player.fallOpacity = 1;
+    }
+
+    function checkSpawnValidity(x, y, r) {
+        // Check holes
+        for (let h of holes) {
+            if (Math.hypot(x - h.x, y - h.y) < h.r + r + 25) return false;
+        }
+        // Check player spawn area (lower center)
+        if (Math.hypot(x - width/2, y - height*0.6) < COIN_RADIUS + r + 50) return false;
+        // Check other balls
+        for (let b of balls) {
+            if (Math.hypot(x - b.pos.x, y - b.pos.y) < b.r + r + 8) return false;
+        }
+        return true;
+    }
+
+    function startGame() {
+        resize();
+        score = 0;
+        balls = [];
+        isGameActive = true;
+        waitingForStop = false;
+        overlay.classList.remove('active');
+        
+        player = new Ball(width / 2, height * 0.6, COIN_RADIUS, true);
+
+        const ballCount = 12; // Increased ball count slightly
+        let attempts = 0;
+        while (balls.length < ballCount && attempts < 1000) {
+            let r = BALL_RADIUS + (Math.random() * 4 - 2); // Slight radius variation
+            let x = Math.random() * (width - 2 * r) + r;
+            let y = Math.random() * (height - 2 * r) + r;
+            
+            if (checkSpawnValidity(x, y, r)) {
+                balls.push(new Ball(x, y, r));
+            }
+            attempts++;
+        }
+        updateUI();
+        requestAnimationFrame(gameLoop);
+    }
+
+    function updateUI() {
+        scoreEl.innerText = score;
+        ballsEl.innerText = balls.length;
+    }
+
+    function checkWinCondition() {
+        if (balls.length === 0) {
+            isGameActive = false;
+            msgTitle.innerText = "Table Cleared!";
+            msgDesc.innerText = `Final Score: ${score}`;
+            overlay.classList.add('active');
+        }
+    }
+
+    function resolveCollisions() {
+        const allBalls = [player, ...balls].filter(b => !b.inHole && !b.isFalling);
+
+        for (let i = 0; i < allBalls.length; i++) {
+            for (let j = i + 1; j < allBalls.length; j++) {
+                let b1 = allBalls[i];
+                let b2 = allBalls[j];
+
+                let distVec = b1.pos.sub(b2.pos);
+                let dist = distVec.mag();
+                let minDist = b1.r + b2.r;
+
+                if (dist < minDist) {
+                    let overlap = (minDist - dist) / 2;
+                    let correction = distVec.normalize().mult(overlap);
+                    b1.pos = b1.pos.add(correction);
+                    b2.pos = b2.pos.sub(correction);
+
+                    let normal = distVec.normalize();
+                    let relativeVelocity = b1.vel.sub(b2.vel);
+                    let velocityAlongNormal = relativeVelocity.x * normal.x + relativeVelocity.y * normal.y;
+
+                    if (velocityAlongNormal > 0) continue;
+
+                    let restitution = BALL_ELASTICITY;
+                    let jVal = -(1 + restitution) * velocityAlongNormal;
+                    jVal /= (1 / b1.mass + 1 / b2.mass);
+
+                    let impulse = normal.mult(jVal);
+                    b1.vel = b1.vel.add(impulse.mult(1 / b1.mass));
+                    b2.vel = b2.vel.sub(impulse.mult(1 / b2.mass));
+                    
+                    // Transfer some spin on collision
+                    let tempSpin = b1.spin;
+                    b1.spin = b2.spin * 0.8;
+                    b2.spin = tempSpin * 0.8;
+                }
+            }
+        }
+    }
+
+    function checkHoles() {
+        const checkBallHole = (ball) => {
+            if (ball.inHole || ball.isFalling) return false;
+            for (let h of holes) {
+                let dist = ball.pos.dist(new Vector(h.x, h.y));
+                // Ball must be mostly over the hole to fall
+                if (dist < h.r - ball.r * 0.3) { 
+                    ball.isFalling = true; // Start animation
+                    // Pull towards center of hole slightly
+                    let pullDir = new Vector(h.x, h.y).sub(ball.pos).normalize();
+                    ball.vel = ball.vel.add(pullDir.mult(1.5)); 
+                    return true;
+                }
+            }
+            return false;
+        };
+
+        for (let i = balls.length - 1; i >= 0; i--) {
+            if (checkBallHole(balls[i])) {
+                score += 100;
+                // Remove from array only after animation finishes (handled in update)
+                setTimeout(() => {
+                     balls = balls.filter(b => !b.inHole);
+                     updateUI();
+                }, 600); 
+            }
+        }
+
+        if (checkBallHole(player)) {
+            score -= 50;
+            waitingForStop = false;
+            setTimeout(resetPlayerPosition, 600); // Wait for animation
+        }
+    }
+
+    function isEveryoneStopped() {
+        if (player.vel.mag() > 0 || player.isFalling) return false;
+        for (let b of balls) {
+            if (b.vel.mag() > 0 || b.isFalling) return false;
+        }
+        return true;
+    }
+
+    // Input Handling
+    function getInputPos(e) {
+        const rect = canvas.getBoundingClientRect();
+        let clientX = e.clientX;
+        let clientY = e.clientY;
+        if (e.touches && e.touches.length > 0) {
+            clientX = e.touches[0].clientX;
+            clientY = e.touches[0].clientY;
+        }
+        // Account for border width in coordinate calculation
+        const border = 16; 
+        return {
+            x: clientX - rect.left - border,
+            y: clientY - rect.top - border
+        };
+    }
+
+    function startDrag(e) {
+        if (!isGameActive || waitingForStop || player.isFalling) return;
+        const pos = getInputPos(e);
+        const dist = player.pos.dist(new Vector(pos.x, pos.y));
+        
+        if (dist < COIN_RADIUS * 2.5) { // Larger touch area
+            isDragging = true;
+            dragStart = { x: player.pos.x, y: player.pos.y };
+            dragCurrent = pos;
+        }
+    }
+
+    function moveDrag(e) {
+        if (!isDragging) return;
+        dragCurrent = getInputPos(e);
+    }
+
+    function endDrag(e) {
+        if (!isDragging) return;
+        isDragging = false;
+
+        let dragVec = new Vector(dragStart.x - dragCurrent.x, dragStart.y - dragCurrent.y);
+        if (dragVec.mag() > MAX_DRAG_DIST) {
+            dragVec = dragVec.normalize().mult(MAX_DRAG_DIST);
+        }
+
+        if (dragVec.mag() > 8) { // Slightly higher threshold
+            player.vel = dragVec.mult(POWER_MULTIPLIER);
+            waitingForStop = true;
+        }
+    }
+
+    canvas.addEventListener('mousedown', startDrag);
+    canvas.addEventListener('mousemove', moveDrag);
+    window.addEventListener('mouseup', endDrag);
+
+    canvas.addEventListener('touchstart', (e) => { e.preventDefault(); startDrag(e); }, {passive: false});
+    canvas.addEventListener('touchmove', (e) => { e.preventDefault(); moveDrag(e); }, {passive: false});
+    window.addEventListener('touchend', endDrag);
+
+    // Main Loop
+    function gameLoop() {
+        if (!isGameActive) return;
+
+        ctx.clearRect(0, 0, width, height);
+
+        // Draw Holes
+        for (let h of holes) {
+            // Hole depth effect
+            ctx.beginPath();
+            ctx.arc(h.x, h.y, h.r + 2, 0, Math.PI*2);
+            ctx.fillStyle = "rgba(0,0,0,0.5)";
+            ctx.fill();
+            
+            ctx.beginPath();
+            ctx.arc(h.x, h.y, h.r, 0, Math.PI*2);
+            ctx.fillStyle = "#0a0a0a";
+            ctx.fill();
+            ctx.strokeStyle = "#0f2e1f"; // Match dark part of felt
+            ctx.lineWidth = 3;
+            ctx.stroke();
+        }
+
+        // Physics & Logic updates
+        player.update();
+        balls.forEach(b => b.update());
+        resolveCollisions();
+        checkHoles();
+        updateUI();
+        checkWinCondition();
+
+        // Draw elements
+        balls.forEach(b => b.draw());
+        if (!player.inHole) player.draw();
+
+        // Draw Drag UI
+        if (isDragging && !player.inHole && !player.isFalling) {
+            let dragVec = new Vector(dragCurrent.x - dragStart.x, dragCurrent.y - dragStart.y);
+            if (dragVec.mag() > MAX_DRAG_DIST) {
+                dragVec = dragVec.normalize().mult(MAX_DRAG_DIST);
+            }
+            let endX = player.pos.x + dragVec.x;
+            let endY = player.pos.y + dragVec.y;
+            let power = dragVec.mag() / MAX_DRAG_DIST;
+
+            // Power line (Aiming backwards)
+            ctx.beginPath();
+            ctx.moveTo(player.pos.x, player.pos.y);
+            ctx.lineTo(endX, endY);
+            ctx.strokeStyle = `rgba(255, ${255 * (1-power)}, 0, 0.7)`; // Yellow to Red based on power
+            ctx.lineWidth = 4;
+            ctx.lineCap = 'round'; // Fixed typo here (was setLineCap)
+            ctx.stroke();
+
+            // Aiming guide (Forwards)
+            let aimVec = dragVec.mult(-1.5); // Longer aim guide
+            let aimEnd = player.pos.add(aimVec);
+            ctx.beginPath();
+            ctx.moveTo(player.pos.x, player.pos.y);
+            ctx.lineTo(aimEnd.x, aimEnd.y);
+            ctx.strokeStyle = "rgba(255, 255, 255, 0.4)";
+            ctx.lineWidth = 2;
+            ctx.setLineDash([6, 6]);
+            ctx.stroke();
+            ctx.setLineDash([]);
+        }
+
+        // Check Turn Reset
+        if (waitingForStop && isEveryoneStopped()) {
+            waitingForStop = false;
+            // Player stays where they are for the next shot
+        }
+
+        requestAnimationFrame(gameLoop);
+    }
+
+    window.addEventListener('resize', resize);
+    window.onload = () => {
+        resize();
+        overlay.classList.add('active');
+    };
+
+</script>
+</body>
+</html>
